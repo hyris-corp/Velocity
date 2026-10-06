@@ -53,8 +53,12 @@ import java.security.KeyPair;
 import java.security.MessageDigest;
 import java.security.SecureRandom;
 import java.util.Arrays;
+import java.util.Locale;
 import java.util.Optional;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Semaphore;
+import java.util.concurrent.TimeUnit;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
 import org.apache.logging.log4j.LogManager;
@@ -74,7 +78,13 @@ public class InitialLoginSessionHandler implements MinecraftSessionHandler {
           .concat("?username=%s&serverId=%s");
   private static final String MOJANG_PROFILE_URL = System.getProperty("mojang.profileapi",
       "https://api.minecraftservices.com/minecraft/profile/lookup/name");
+  private static final String MOJANG_FALLBACK_PROFILE_URL = System.getProperty("mojang.profileapi.fallback",
+      "https://api.mojang.com/users/profiles/minecraft");
   private static final Semaphore MOJANG_PROFILE_LOOKUP_SLOTS = new Semaphore(32);
+  private static final OfficialProfileLookupCache OFFICIAL_PROFILE_CACHE = new OfficialProfileLookupCache();
+  private static final PreLoginRateLimiter PRE_LOGIN_RATE_LIMITER = new PreLoginRateLimiter();
+  private static final ConcurrentHashMap<String, CompletableFuture<Boolean>> PROFILE_LOOKUPS_IN_FLIGHT =
+      new ConcurrentHashMap<>();
 
   private final VelocityServer server;
   private final MinecraftConnection mcConnection;
@@ -126,6 +136,17 @@ public class InitialLoginSessionHandler implements MinecraftSessionHandler {
     inbound.setPlayerKey(playerKey);
     this.login = packet;
 
+    String clientIp = mcConnection.getRemoteAddress() instanceof InetSocketAddress address
+            ? address.getAddress() == null ? address.getHostString() : address.getAddress().getHostAddress()
+            : String.valueOf(mcConnection.getRemoteAddress());
+    if (clientIp == null || clientIp.isBlank())
+      clientIp = "unknown";
+    if (!PRE_LOGIN_RATE_LIMITER.allow(login.getUsername(), clientIp, System.currentTimeMillis())) {
+      inbound.disconnect(Component.text("Muitas tentativas de conexão. Aguarde um pouco e tente novamente.",
+          NamedTextColor.RED));
+      return true;
+    }
+
     final PreLoginEvent event = new PreLoginEvent(inbound, login.getUsername(), login.getHolderUuid());
     server.getEventManager().fire(event).thenRunAsync(() -> {
       if (mcConnection.isClosed()) {
@@ -145,7 +166,7 @@ public class InitialLoginSessionHandler implements MinecraftSessionHandler {
           if (mcConnection.isClosed()) {
             return;
           }
-          if (server.getConfiguration().isOnlineMode() || result.isOnlineModeAllowed()) {
+          if (!shouldLookupOfficialProfile(server.getConfiguration().isOnlineMode(), result)) {
             continueLogin(result);
             return;
           }
@@ -186,7 +207,39 @@ public class InitialLoginSessionHandler implements MinecraftSessionHandler {
         : PreLoginComponentResult.forceOfflineMode();
   }
 
+  static boolean shouldLookupOfficialProfile(boolean proxyOnlineMode, PreLoginComponentResult result) {
+    return !proxyOnlineMode && !result.isOnlineModeAllowed() && !result.isForceOfflineMode();
+  }
+
   private java.util.concurrent.CompletableFuture<Boolean> hasOfficialProfile(String username) {
+    long now = System.currentTimeMillis();
+    Boolean cached = OFFICIAL_PROFILE_CACHE.cached(username, now);
+    if (cached != null)
+      return CompletableFuture.completedFuture(cached);
+
+    String key = username.trim().toLowerCase(Locale.ROOT);
+    CompletableFuture<Boolean> lookup = new CompletableFuture<>();
+    CompletableFuture<Boolean> existing = PROFILE_LOOKUPS_IN_FLIGHT.putIfAbsent(key, lookup);
+    if (existing != null)
+      return existing;
+    if (!OFFICIAL_PROFILE_CACHE.mayQuery(now)) {
+      PROFILE_LOOKUPS_IN_FLIGHT.remove(key, lookup);
+      return CompletableFuture.failedFuture(new IllegalStateException("Mojang profile lookup circuit is open"));
+    }
+    fetchOfficialProfile(username).whenComplete((exists, failure) -> {
+      PROFILE_LOOKUPS_IN_FLIGHT.remove(key, lookup);
+      if (failure == null) {
+        OFFICIAL_PROFILE_CACHE.succeeded(username, exists, System.currentTimeMillis());
+        lookup.complete(exists);
+      } else {
+        OFFICIAL_PROFILE_CACHE.failed(System.currentTimeMillis());
+        lookup.completeExceptionally(failure);
+      }
+    });
+    return lookup;
+  }
+
+  private java.util.concurrent.CompletableFuture<Boolean> fetchOfficialProfile(String username) {
     if (!MOJANG_PROFILE_LOOKUP_SLOTS.tryAcquire()) {
       return java.util.concurrent.CompletableFuture.failedFuture(
           new IllegalStateException("Mojang profile lookup capacity is exhausted"));
@@ -200,12 +253,7 @@ public class InitialLoginSessionHandler implements MinecraftSessionHandler {
     }
     final HttpRequest request;
     try {
-      request = HttpRequest.newBuilder(URI.create(MOJANG_PROFILE_URL + "/"
-              + urlFormParameterEscaper().escape(username)))
-          .timeout(Duration.ofSeconds(5))
-          .header("User-Agent", server.getVersion().getName() + "/" + server.getVersion().getVersion())
-          .GET()
-          .build();
+      request = profileRequest(MOJANG_PROFILE_URL, username);
     } catch (RuntimeException exception) {
       client.close();
       MOJANG_PROFILE_LOOKUP_SLOTS.release();
@@ -213,12 +261,17 @@ public class InitialLoginSessionHandler implements MinecraftSessionHandler {
     }
     try {
       return client.sendAsync(request, HttpResponse.BodyHandlers.discarding())
-          .thenApply(response -> {
-            try {
-              return officialProfileExistsForStatus(response.statusCode());
-            } catch (IllegalStateException exception) {
-              throw new java.util.concurrent.CompletionException(exception);
+          .thenCompose(response -> {
+            if (shouldFallbackProfileLookup(response.statusCode())) {
+              final HttpRequest fallbackRequest;
+              try {
+                fallbackRequest = profileRequest(MOJANG_FALLBACK_PROFILE_URL, username);
+              } catch (RuntimeException exception) {
+                return CompletableFuture.failedFuture(exception);
+              }
+              return sendProfileFallback(client, fallbackRequest);
             }
+            return profileExistsResult(response.statusCode());
           })
           .whenComplete((ignored, failure) -> {
             try {
@@ -235,6 +288,52 @@ public class InitialLoginSessionHandler implements MinecraftSessionHandler {
       }
       return java.util.concurrent.CompletableFuture.failedFuture(exception);
     }
+  }
+
+  private HttpRequest profileRequest(String baseUrl, String username) {
+    return HttpRequest.newBuilder(URI.create(baseUrl + "/" + urlFormParameterEscaper().escape(username)))
+        .timeout(Duration.ofSeconds(5))
+        .header("User-Agent", server.getVersion().getName() + "/" + server.getVersion().getVersion())
+        .GET()
+        .build();
+  }
+
+  private CompletableFuture<Boolean> sendProfileFallback(HttpClient client, HttpRequest request) {
+    return client.sendAsync(request, HttpResponse.BodyHandlers.discarding())
+        .thenCompose(response -> {
+          if (shouldRetryProfileStatus(response.statusCode()))
+            return retryProfileFallback(client, request, 2);
+          return profileExistsResult(response.statusCode());
+        });
+  }
+
+  private CompletableFuture<Boolean> retryProfileFallback(HttpClient client, HttpRequest request, int retriesLeft) {
+    if (retriesLeft <= 0)
+      return CompletableFuture.failedFuture(new IllegalStateException("Profile APIs remain unavailable"));
+    final long delay = retriesLeft == 2 ? 250 : 750;
+    return CompletableFuture.runAsync(() -> { }, CompletableFuture.delayedExecutor(delay, TimeUnit.MILLISECONDS))
+        .thenCompose(ignored -> client.sendAsync(request, HttpResponse.BodyHandlers.discarding()))
+        .thenCompose(response -> {
+          if (shouldRetryProfileStatus(response.statusCode()))
+            return retryProfileFallback(client, request, retriesLeft - 1);
+          return profileExistsResult(response.statusCode());
+        });
+  }
+
+  private static CompletableFuture<Boolean> profileExistsResult(int statusCode) {
+    try {
+      return CompletableFuture.completedFuture(officialProfileExistsForStatus(statusCode));
+    } catch (IllegalStateException exception) {
+      return CompletableFuture.failedFuture(exception);
+    }
+  }
+
+  static boolean shouldFallbackProfileLookup(int statusCode) {
+    return shouldRetryProfileStatus(statusCode);
+  }
+
+  private static boolean shouldRetryProfileStatus(int statusCode) {
+    return statusCode == 403 || statusCode == 429 || statusCode >= 500;
   }
 
   static boolean officialProfileExistsForStatus(int statusCode) {
@@ -323,7 +422,7 @@ public class InitialLoginSessionHandler implements MinecraftSessionHandler {
               .build();
       //noinspection resource
       final HttpClient httpClient = server.createHttpClient();
-      httpClient.sendAsync(httpRequest, HttpResponse.BodyHandlers.ofString())
+      sendHasJoinedWithRetry(httpClient, httpRequest, 3)
           .whenCompleteAsync((response, throwable) -> {
             if (mcConnection.isClosed()) {
               // The player disconnected after we authenticated them.
@@ -371,6 +470,18 @@ public class InitialLoginSessionHandler implements MinecraftSessionHandler {
       mcConnection.close(true);
     }
     return true;
+  }
+
+  private CompletableFuture<HttpResponse<String>> sendHasJoinedWithRetry(HttpClient client,
+                                                                          HttpRequest request,
+                                                                          int attemptsLeft) {
+    return client.sendAsync(request, HttpResponse.BodyHandlers.ofString()).thenCompose(response -> {
+      if (!shouldRetryProfileStatus(response.statusCode()) || attemptsLeft <= 1)
+        return CompletableFuture.completedFuture(response);
+      final long delay = attemptsLeft == 3 ? 250 : 750;
+      return CompletableFuture.runAsync(() -> { }, CompletableFuture.delayedExecutor(delay, TimeUnit.MILLISECONDS))
+          .thenCompose(ignored -> sendHasJoinedWithRetry(client, request, attemptsLeft - 1));
+    });
   }
 
   private EncryptionRequestPacket generateEncryptionRequest() {

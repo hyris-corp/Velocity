@@ -99,6 +99,15 @@ public class VelocityConfiguration implements ProxyConfig {
   private boolean forceKeyAuthentication = true; // Added in 1.19
   @Expose
   private PacketLimiterConfig packetLimiterConfig = PacketLimiterConfig.DEFAULT;
+  @Expose
+  private boolean resourcePackEnabled;
+  @Expose
+  private String resourcePackUrl = "";
+  @Expose
+  private String resourcePackHash = "";
+  @Expose
+  private boolean resourcePackRequired;
+  private byte[] parsedResourcePackHash;
 
   private VelocityConfiguration(Servers servers, ForcedHosts forcedHosts, Advanced advanced,
       Query query, Metrics metrics) {
@@ -299,6 +308,22 @@ public class VelocityConfiguration implements ProxyConfig {
   @Override
   public boolean isOnlineMode() {
     return onlineMode;
+  }
+
+  public boolean isResourcePackEnabled() {
+    return resourcePackEnabled;
+  }
+
+  public String getResourcePackUrl() {
+    return resourcePackUrl;
+  }
+
+  public byte[] getResourcePackHash() {
+    return parsedResourcePackHash == null ? null : parsedResourcePackHash.clone();
+  }
+
+  public boolean isResourcePackRequired() {
+    return resourcePackRequired;
   }
 
   @Override
@@ -556,6 +581,7 @@ public class VelocityConfiguration implements ProxyConfig {
       final CommentedConfig advancedConfig = config.get("advanced");
       final CommentedConfig queryConfig = config.get("query");
       final CommentedConfig metricsConfig = config.get("metrics");
+      final CommentedConfig resourcePackConfig = config.get("resource-pack");
       final PlayerInfoForwarding forwardingMode = config.getEnumOrElse(
               "player-info-forwarding-mode", PlayerInfoForwarding.NONE);
       final PingPassthroughMode pingPassthrough = PingPassthroughMode.fromConfig(config.get("ping-passthrough"));
@@ -572,6 +598,20 @@ public class VelocityConfiguration implements ProxyConfig {
       final boolean enablePlayerAddressLogging = config.getOrElse(
               "enable-player-address-logging", true);
       final PacketLimiterConfig packetLimiterConfig = PacketLimiterConfig.fromConfig(config.get("packet-limiter"));
+      final boolean resourcePackEnabled = resourcePackConfig.getOrElse("enabled", false);
+      final String resourcePackUrl = resourcePackConfig.getOrElse("url", "");
+      final String resourcePackHash = resourcePackConfig.getOrElse("hash", "");
+      final boolean resourcePackRequired = resourcePackConfig.getOrElse("required", false);
+      if (resourcePackEnabled && resourcePackUrl.isBlank()) {
+        throw new RuntimeException("Resource pack is enabled but resource-pack.url is empty.");
+      }
+      byte[] parsedResourcePackHash = null;
+      if (!resourcePackHash.isBlank()) {
+        if (!resourcePackHash.matches("(?i)[0-9a-f]{40}")) {
+          throw new RuntimeException("resource-pack.hash must be a 40-character SHA-1 hexadecimal string.");
+        }
+        parsedResourcePackHash = java.util.HexFormat.of().parseHex(resourcePackHash);
+      }
 
       // Throw an exception if the forwarding-secret file is empty and the proxy is using a
       // forwarding mode that requires it.
@@ -581,7 +621,7 @@ public class VelocityConfiguration implements ProxyConfig {
         throw new RuntimeException("The forwarding-secret file must not be empty.");
       }
 
-      return new VelocityConfiguration(
+      VelocityConfiguration velocityConfiguration = new VelocityConfiguration(
               bind,
               motd,
               maxPlayers,
@@ -602,6 +642,12 @@ public class VelocityConfiguration implements ProxyConfig {
               forceKeyAuthentication,
               packetLimiterConfig
       );
+      velocityConfiguration.resourcePackEnabled = resourcePackEnabled;
+      velocityConfiguration.resourcePackUrl = resourcePackUrl;
+      velocityConfiguration.resourcePackHash = resourcePackHash;
+      velocityConfiguration.resourcePackRequired = resourcePackRequired;
+      velocityConfiguration.parsedResourcePackHash = parsedResourcePackHash;
+      return velocityConfiguration;
     }
   }
 

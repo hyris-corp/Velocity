@@ -59,6 +59,12 @@ sample-players-in-ping = false
 # If not enabled (default is true) player IP addresses will be replaced by <ip address withheld> in logs
 enable-player-address-logging = true
 
+[resource-pack]
+enabled = false
+url = ""
+hash = ""
+required = false
+
 [ping-passthrough]
 # Should Velocity pass the version number from the backend server when responding to server list ping requests?
 version = false

@@ -21,6 +21,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
+import com.velocitypowered.api.event.connection.PreLoginEvent;
 import org.junit.jupiter.api.Test;
 
 class MixedModeLoginTest {
@@ -38,10 +39,25 @@ class MixedModeLoginTest {
   }
 
   @Test
+  void knownAccountModeSkipsOfficialProfileLookup() {
+    assertFalse(InitialLoginSessionHandler.shouldLookupOfficialProfile(false,
+        PreLoginEvent.PreLoginComponentResult.forceOfflineMode()));
+    assertFalse(InitialLoginSessionHandler.shouldLookupOfficialProfile(false,
+        PreLoginEvent.PreLoginComponentResult.forceOnlineMode()));
+    assertTrue(InitialLoginSessionHandler.shouldLookupOfficialProfile(false,
+        PreLoginEvent.PreLoginComponentResult.allowed()));
+    assertFalse(InitialLoginSessionHandler.shouldLookupOfficialProfile(true,
+        PreLoginEvent.PreLoginComponentResult.allowed()));
+  }
+
+  @Test
   void treatsOnlyOfficialProfileLookupStatusesAsRoutingEvidence() {
     assertTrue(InitialLoginSessionHandler.officialProfileExistsForStatus(200));
     assertFalse(InitialLoginSessionHandler.officialProfileExistsForStatus(204));
     assertFalse(InitialLoginSessionHandler.officialProfileExistsForStatus(404));
+    assertTrue(InitialLoginSessionHandler.shouldFallbackProfileLookup(403));
+    assertTrue(InitialLoginSessionHandler.shouldFallbackProfileLookup(429));
+    assertFalse(InitialLoginSessionHandler.shouldFallbackProfileLookup(404));
     assertThrows(IllegalStateException.class,
         () -> InitialLoginSessionHandler.officialProfileExistsForStatus(503));
   }

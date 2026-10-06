@@ -72,7 +72,9 @@ public final class ModernResourcePackHandler extends ResourcePackHandler {
 
   @Override
   public @NotNull Collection<ResourcePackInfo> getPendingResourcePacks() {
-    return List.copyOf(pendingResourcePacks.values());
+    final Map<UUID, ResourcePackInfo> allPending = new ConcurrentHashMap<>(pendingResourcePacks);
+    outstandingResourcePacks.values().forEach(info -> allPending.putIfAbsent(info.getId(), info));
+    return List.copyOf(allPending.values());
   }
 
   @Override

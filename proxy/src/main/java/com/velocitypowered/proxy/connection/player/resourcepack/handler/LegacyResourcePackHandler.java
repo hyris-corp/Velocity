@@ -70,10 +70,12 @@ public sealed class LegacyResourcePackHandler extends ResourcePackHandler
 
   @Override
   public @NotNull Collection<ResourcePackInfo> getPendingResourcePacks() {
-    if (pendingResourcePack == null) {
+    final ResourcePackInfo pending = pendingResourcePack != null
+            ? pendingResourcePack : outstandingResourcePacks.peek();
+    if (pending == null) {
       return List.of();
     }
-    return List.of(pendingResourcePack);
+    return List.of(pending);
   }
 
   @Override

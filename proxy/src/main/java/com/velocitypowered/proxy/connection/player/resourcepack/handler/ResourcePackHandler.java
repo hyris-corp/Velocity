@@ -18,6 +18,7 @@
 package com.velocitypowered.proxy.connection.player.resourcepack.handler;
 
 import com.velocitypowered.api.network.ProtocolVersion;
+import com.velocitypowered.api.event.player.PlayerResourcePackStatusEvent;
 import com.velocitypowered.api.proxy.player.ResourcePackInfo;
 import com.velocitypowered.proxy.VelocityServer;
 import com.velocitypowered.proxy.connection.backend.VelocityServerConnection;
@@ -30,6 +31,8 @@ import com.velocitypowered.proxy.protocol.packet.chat.ComponentHolder;
 import io.netty.buffer.ByteBufUtil;
 import java.util.Collection;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import net.kyori.adventure.resource.ResourcePackRequest;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
@@ -39,6 +42,7 @@ import org.jetbrains.annotations.Nullable;
  */
 public abstract sealed class ResourcePackHandler
         permits LegacyResourcePackHandler, ModernResourcePackHandler {
+  private final ConcurrentHashMap<UUID, CompletableFuture<Boolean>> initialPackResults = new ConcurrentHashMap<>();
   protected final ConnectedPlayer player;
   protected final VelocityServer server;
 
@@ -87,6 +91,19 @@ public abstract sealed class ResourcePackHandler
    * empty.
    */
   public abstract void queueResourcePack(final @NotNull ResourcePackInfo info);
+
+  public CompletableFuture<Boolean> queueResourcePackAndWait(final @NotNull ResourcePackInfo info) {
+    final CompletableFuture<Boolean> result = new CompletableFuture<>();
+    initialPackResults.put(info.getId(), result);
+    try {
+      queueResourcePack(info);
+    } catch (RuntimeException exception) {
+      initialPackResults.remove(info.getId(), result);
+      result.completeExceptionally(exception);
+    }
+    result.whenComplete((ignored, failure) -> initialPackResults.remove(info.getId(), result));
+    return result;
+  }
 
   /**
    * Queues a resource-request for sending to the player and sends it immediately if the queue is
@@ -150,6 +167,12 @@ public abstract sealed class ResourcePackHandler
           final @Nullable ResourcePackInfo queued,
           final @NotNull ResourcePackResponseBundle bundle
   ) {
+    if (queued != null && !bundle.status().isIntermediate()) {
+      final CompletableFuture<Boolean> initialPackResult = initialPackResults.remove(queued.getId());
+      if (initialPackResult != null) {
+        initialPackResult.complete(bundle.status() == PlayerResourcePackStatusEvent.Status.SUCCESSFUL);
+      }
+    }
     // If Velocity, through a plugin, has sent a resource pack to the client,
     // there is no need to report the status of the response to the server
     // since it has no information that a resource pack has been sent

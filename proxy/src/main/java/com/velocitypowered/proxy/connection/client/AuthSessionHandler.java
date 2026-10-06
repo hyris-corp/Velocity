@@ -39,6 +39,7 @@ import com.velocitypowered.proxy.config.VelocityConfiguration;
 import com.velocitypowered.proxy.connection.MinecraftConnection;
 import com.velocitypowered.proxy.connection.MinecraftSessionHandler;
 import com.velocitypowered.proxy.crypto.IdentifiedKeyImpl;
+import com.velocitypowered.proxy.connection.player.resourcepack.VelocityResourcePackInfo;
 import com.velocitypowered.proxy.protocol.StateRegistry;
 import com.velocitypowered.proxy.protocol.packet.LoginAcknowledgedPacket;
 import com.velocitypowered.proxy.protocol.packet.ServerLoginSuccessPacket;
@@ -49,6 +50,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
 import org.apache.logging.log4j.LogManager;
@@ -193,13 +195,7 @@ public class AuthSessionHandler implements MinecraftSessionHandler {
     } else {
       loginState = State.ACKNOWLEDGED;
       mcConnection.setActiveSessionHandler(StateRegistry.CONFIG, new ClientConfigSessionHandler(server, connectedPlayer));
-
-      server.getEventManager().fire(new PostLoginEvent(connectedPlayer)).thenCompose(ignored -> {
-        return connectToInitialServer(connectedPlayer);
-      }).exceptionally((ex) -> {
-        logger.error("Exception while connecting {} to initial server", connectedPlayer, ex);
-        return null;
-      });
+      startPostLogin(connectedPlayer);
     }
     return true;
   }
@@ -262,12 +258,7 @@ public class AuthSessionHandler implements MinecraftSessionHandler {
         if (inbound.getProtocolVersion().lessThan(ProtocolVersion.MINECRAFT_1_20_2)) {
           loginState = State.ACKNOWLEDGED;
           mcConnection.setActiveSessionHandler(StateRegistry.PLAY, new InitialConnectSessionHandler(player, server));
-          server.getEventManager().fire(new PostLoginEvent(player)).thenCompose((ignored) -> {
-            return connectToInitialServer(player);
-          }).exceptionally((ex) -> {
-            logger.error("Exception while connecting {} to initial server", player, ex);
-            return null;
-          });
+          startPostLogin(player);
         }
       }
     }, mcConnection.eventLoop()).exceptionally((ex) -> {
@@ -291,6 +282,44 @@ public class AuthSessionHandler implements MinecraftSessionHandler {
       }
       player.createConnectionRequest(toTry.get()).fireAndForget();
     }, mcConnection.eventLoop());
+  }
+
+  private void startPostLogin(ConnectedPlayer player) {
+    final VelocityConfiguration configuration = server.getConfiguration();
+    if (!configuration.isResourcePackEnabled()) {
+      firePostLogin(player);
+      return;
+    }
+
+    final VelocityResourcePackInfo.BuilderImpl packBuilder = new VelocityResourcePackInfo.BuilderImpl(
+            configuration.getResourcePackUrl())
+            .setShouldForce(configuration.isResourcePackRequired());
+    if (configuration.getResourcePackHash() != null) {
+      packBuilder.setHash(configuration.getResourcePackHash());
+    }
+
+    player.resourcePackHandler().queueResourcePackAndWait(packBuilder.build())
+            .orTimeout(120, TimeUnit.SECONDS)
+            .whenCompleteAsync((applied, failure) -> {
+              if (mcConnection.isClosed()) {
+                return;
+              }
+              if (configuration.isResourcePackRequired()
+                      && (failure != null || !Boolean.TRUE.equals(applied))) {
+                player.disconnect0(Component.text("The required resource pack could not be applied.",
+                        NamedTextColor.RED), true);
+              }
+            }, mcConnection.eventLoop());
+    firePostLogin(player);
+  }
+
+  private void firePostLogin(ConnectedPlayer player) {
+    server.getEventManager().fire(new PostLoginEvent(player)).thenCompose(ignored -> {
+      return connectToInitialServer(player);
+    }).exceptionally((ex) -> {
+      logger.error("Exception while connecting {} to initial server", player, ex);
+      return null;
+    });
   }
 
   @Override
