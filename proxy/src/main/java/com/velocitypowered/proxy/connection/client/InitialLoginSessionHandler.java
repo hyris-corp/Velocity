@@ -47,12 +47,14 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.time.Duration;
 import java.security.GeneralSecurityException;
 import java.security.KeyPair;
 import java.security.MessageDigest;
 import java.security.SecureRandom;
 import java.util.Arrays;
 import java.util.Optional;
+import java.util.concurrent.Semaphore;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
 import org.apache.logging.log4j.LogManager;
@@ -70,6 +72,9 @@ public class InitialLoginSessionHandler implements MinecraftSessionHandler {
       System.getProperty("mojang.sessionserver",
               "https://sessionserver.mojang.com/session/minecraft/hasJoined")
           .concat("?username=%s&serverId=%s");
+  private static final String MOJANG_PROFILE_URL = System.getProperty("mojang.profileapi",
+      "https://api.minecraftservices.com/minecraft/profile/lookup/name");
+  private static final Semaphore MOJANG_PROFILE_LOOKUP_SLOTS = new Semaphore(32);
 
   private final VelocityServer server;
   private final MinecraftConnection mcConnection;
@@ -136,33 +141,130 @@ public class InitialLoginSessionHandler implements MinecraftSessionHandler {
         return;
       }
 
-      inbound.loginEventFired(() -> {
-        if (mcConnection.isClosed()) {
-          // The player was disconnected
-          return;
-        }
-
-        mcConnection.eventLoop().execute(() -> {
-          if (!result.isForceOfflineMode()
-              && (server.getConfiguration().isOnlineMode() || result.isOnlineModeAllowed())) {
-            // Request encryption.
-            EncryptionRequestPacket request = generateEncryptionRequest();
-            this.verify = Arrays.copyOf(request.getVerifyToken(), 4);
-            mcConnection.write(request);
-            this.currentState = LoginState.ENCRYPTION_REQUEST_SENT;
-          } else {
-            mcConnection.setActiveSessionHandler(StateRegistry.LOGIN,
-                new AuthSessionHandler(server, inbound,
-                    GameProfile.forOfflinePlayer(login.getUsername()), false, null));
+        inbound.loginEventFired(() -> {
+          if (mcConnection.isClosed()) {
+            return;
           }
+          if (server.getConfiguration().isOnlineMode() || result.isOnlineModeAllowed()) {
+            continueLogin(result);
+            return;
+          }
+
+          // In mixed mode, profile existence only selects the required challenge. It is never
+          // accepted as proof; a found profile must still pass Velocity's native hasJoined flow.
+          hasOfficialProfile(login.getUsername()).whenComplete((exists, failure) -> {
+            if (mcConnection.isClosed()) {
+              return;
+            }
+            if (failure != null) {
+              logger.warn("Unable to resolve official profile for {}", login.getUsername(), failure);
+              mcConnection.eventLoop().execute(() -> inbound.disconnect(
+                  Component.translatable("multiplayer.disconnect.authservers_down")));
+              return;
+            }
+
+            PreLoginComponentResult selectedMode = selectMixedMode(exists);
+            if (result.isForceOfflineMode() && exists) {
+              logger.warn("Ignoring forced offline mode for reserved Minecraft profile {}",
+                  login.getUsername());
+            }
+            logger.info("Selected {} login challenge for {} from official profile lookup; profile existence is not authentication",
+                exists ? "PREMIUM" : "OFFLINE", login.getUsername());
+            continueLogin(selectedMode);
+          });
         });
-      });
     }, mcConnection.eventLoop()).exceptionally((ex) -> {
       logger.error("Exception in pre-login stage", ex);
       return null;
     });
 
     return true;
+  }
+
+  static PreLoginComponentResult selectMixedMode(boolean officialProfileExists) {
+    return officialProfileExists ? PreLoginComponentResult.forceOnlineMode()
+        : PreLoginComponentResult.forceOfflineMode();
+  }
+
+  private java.util.concurrent.CompletableFuture<Boolean> hasOfficialProfile(String username) {
+    if (!MOJANG_PROFILE_LOOKUP_SLOTS.tryAcquire()) {
+      return java.util.concurrent.CompletableFuture.failedFuture(
+          new IllegalStateException("Mojang profile lookup capacity is exhausted"));
+    }
+    final HttpClient client;
+    try {
+      client = server.createHttpClient();
+    } catch (RuntimeException exception) {
+      MOJANG_PROFILE_LOOKUP_SLOTS.release();
+      return java.util.concurrent.CompletableFuture.failedFuture(exception);
+    }
+    final HttpRequest request;
+    try {
+      request = HttpRequest.newBuilder(URI.create(MOJANG_PROFILE_URL + "/"
+              + urlFormParameterEscaper().escape(username)))
+          .timeout(Duration.ofSeconds(5))
+          .header("User-Agent", server.getVersion().getName() + "/" + server.getVersion().getVersion())
+          .GET()
+          .build();
+    } catch (RuntimeException exception) {
+      client.close();
+      MOJANG_PROFILE_LOOKUP_SLOTS.release();
+      return java.util.concurrent.CompletableFuture.failedFuture(exception);
+    }
+    try {
+      return client.sendAsync(request, HttpResponse.BodyHandlers.discarding())
+          .thenApply(response -> {
+            try {
+              return officialProfileExistsForStatus(response.statusCode());
+            } catch (IllegalStateException exception) {
+              throw new java.util.concurrent.CompletionException(exception);
+            }
+          })
+          .whenComplete((ignored, failure) -> {
+            try {
+              client.close();
+            } finally {
+              MOJANG_PROFILE_LOOKUP_SLOTS.release();
+            }
+          });
+    } catch (RuntimeException exception) {
+      try {
+        client.close();
+      } finally {
+        MOJANG_PROFILE_LOOKUP_SLOTS.release();
+      }
+      return java.util.concurrent.CompletableFuture.failedFuture(exception);
+    }
+  }
+
+  static boolean officialProfileExistsForStatus(int statusCode) {
+    if (statusCode == 200) {
+      return true;
+    }
+    if (statusCode == 204 || statusCode == 404) {
+      return false;
+    }
+    throw new IllegalStateException("Unexpected Mojang profile API status " + statusCode);
+  }
+
+  private void continueLogin(PreLoginComponentResult result) {
+    mcConnection.eventLoop().execute(() -> {
+      if (mcConnection.isClosed()) {
+        return;
+      }
+      if (!result.isForceOfflineMode()
+          && (server.getConfiguration().isOnlineMode() || result.isOnlineModeAllowed())) {
+        // Ask the client to encrypt, then validate its session with Mojang's hasJoined endpoint.
+        EncryptionRequestPacket request = generateEncryptionRequest();
+        this.verify = Arrays.copyOf(request.getVerifyToken(), 4);
+        mcConnection.write(request);
+        this.currentState = LoginState.ENCRYPTION_REQUEST_SENT;
+      } else {
+        mcConnection.setActiveSessionHandler(StateRegistry.LOGIN,
+            new AuthSessionHandler(server, inbound,
+                GameProfile.forOfflinePlayer(login.getUsername()), false, null));
+      }
+    });
   }
 
   @Override

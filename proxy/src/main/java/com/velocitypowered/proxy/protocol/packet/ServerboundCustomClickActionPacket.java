@@ -24,6 +24,7 @@ import com.velocitypowered.proxy.protocol.ProtocolUtils;
 import com.velocitypowered.proxy.protocol.ProtocolUtils.Direction;
 import com.velocitypowered.proxy.protocol.util.DeferredByteBufHolder;
 import io.netty.buffer.ByteBuf;
+import net.kyori.adventure.key.Key;
 
 public class ServerboundCustomClickActionPacket extends DeferredByteBufHolder implements MinecraftPacket {
 
@@ -31,6 +32,30 @@ public class ServerboundCustomClickActionPacket extends DeferredByteBufHolder im
 
   public ServerboundCustomClickActionPacket() {
     super(null);
+  }
+
+  public Key getAction() {
+    try {
+      var buf = content().duplicate();
+      return ProtocolUtils.readKey(buf);
+    } catch (RuntimeException exception) {
+      return Key.key("velocity", "invalid_custom_click");
+    }
+  }
+
+  public byte[] getPayload() {
+    try {
+      var buf = content().duplicate();
+      ProtocolUtils.readKey(buf);
+      return io.netty.buffer.ByteBufUtil.getBytes(buf);
+    } catch (RuntimeException exception) {
+      return new byte[0];
+    }
+  }
+
+  @Override
+  public String toString() {
+    return "ServerboundCustomClickActionPacket{payload=<redacted>}";
   }
 
   @Override
@@ -45,7 +70,7 @@ public class ServerboundCustomClickActionPacket extends DeferredByteBufHolder im
 
   @Override
   public int decodeExpectedMaxLength(ByteBuf buf, Direction direction, ProtocolVersion version) {
-    return ProtocolUtils.DEFAULT_MAX_STRING_BYTES + ProtocolUtils.varIntBytes(MAX_TAG_SIZE) + MAX_TAG_SIZE;
+    return ProtocolUtils.DEFAULT_MAX_STRING_BYTES + ProtocolUtils.varIntBytes(MAX_TAG_SIZE) + MAX_TAG_SIZE + 1;
   }
 
   @Override

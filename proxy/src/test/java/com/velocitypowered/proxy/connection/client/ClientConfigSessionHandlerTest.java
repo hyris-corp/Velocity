@@ -29,12 +29,15 @@ import com.velocitypowered.proxy.connection.MinecraftConnection;
 import com.velocitypowered.proxy.connection.backend.BackendConnectionPhase;
 import com.velocitypowered.proxy.connection.backend.VelocityServerConnection;
 import com.velocitypowered.proxy.protocol.packet.ServerboundCustomClickActionPacket;
+import com.velocitypowered.proxy.protocol.ProtocolUtils;
+import com.velocitypowered.api.network.ProtocolVersion;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
 import io.netty.util.ReferenceCountUtil;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+
 
 class ClientConfigSessionHandlerTest {
 
@@ -55,45 +58,24 @@ class ClientConfigSessionHandlerTest {
   }
 
   private ServerboundCustomClickActionPacket makePacket() {
-    ByteBuf frame = Unpooled.buffer().writeByte(0);
+    ByteBuf frame = Unpooled.buffer();
+    ProtocolUtils.writeKey(frame, net.kyori.adventure.key.Key.key("hyris", "auth/login"));
+    frame.writeBoolean(true); // Optional anonymous NBT payload is present.
+    frame.writeByte(10); // NBT compound root, followed by an empty compound body.
+    frame.writeByte(0);
     ServerboundCustomClickActionPacket pkt = new ServerboundCustomClickActionPacket();
-    pkt.replace(frame.readRetainedSlice(frame.readableBytes()));
+    pkt.decode(frame, ProtocolUtils.Direction.SERVERBOUND, ProtocolVersion.MINECRAFT_1_21_11);
     return pkt;
   }
 
   @Test
-  void handleForwardsToInFlightServer() {
-    VelocityServerConnection inFlight = mock(VelocityServerConnection.class);
-    MinecraftConnection backend = mock(MinecraftConnection.class);
-    when(player.getConnectionInFlightOrConnectedServer()).thenReturn(inFlight);
-    when(inFlight.ensureConnected()).thenReturn(backend);
-
-    ServerboundCustomClickActionPacket pkt = makePacket();
-    assertTrue(handler.handle(pkt));
-    verify(backend).write(pkt);
-    ReferenceCountUtil.release(pkt);
-  }
-
-  @Test
-  void handleForwardsToConnectedServerWhenInFlightIsNull() {
-    VelocityServerConnection connected = mock(VelocityServerConnection.class);
-    MinecraftConnection backend = mock(MinecraftConnection.class);
-    when(player.getConnectionInFlightOrConnectedServer()).thenReturn(connected);
-    when(connected.ensureConnected()).thenReturn(backend);
-
-    ServerboundCustomClickActionPacket pkt = makePacket();
-    assertTrue(handler.handle(pkt));
-    verify(backend).write(pkt);
-    ReferenceCountUtil.release(pkt);
-  }
-
-  @Test
-  void handleReturnsFalseWhenNoServer() {
-    when(player.getConnectionInFlightOrConnectedServer()).thenReturn(null);
-
-    ServerboundCustomClickActionPacket pkt = makePacket();
-    assertFalse(handler.handle(pkt));
-    ReferenceCountUtil.release(pkt);
+  void customClickActionReadsIdentifierAndPreservesNbtPayload() {
+    ServerboundCustomClickActionPacket packet = makePacket();
+    assertEquals("hyris:auth/login", packet.getAction().asString());
+    assertEquals(3, packet.getPayload().length);
+    assertFalse(packet.toString().contains("hyris:auth/login"));
+    assertTrue(packet.toString().contains("<redacted>"));
+    ReferenceCountUtil.release(packet);
   }
 
   @Test

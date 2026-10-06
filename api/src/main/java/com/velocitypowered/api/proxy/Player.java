@@ -9,6 +9,7 @@ package com.velocitypowered.api.proxy;
 
 import com.velocitypowered.api.command.CommandSource;
 import com.velocitypowered.api.event.player.CookieReceiveEvent;
+import com.velocitypowered.api.util.ClientModInfo;
 import com.velocitypowered.api.event.player.PlayerResourcePackStatusEvent;
 import com.velocitypowered.api.proxy.crypto.KeyIdentifiable;
 import com.velocitypowered.api.proxy.messages.ChannelIdentifier;
@@ -28,6 +29,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.function.UnaryOperator;
 import net.kyori.adventure.dialog.DialogLike;
 import net.kyori.adventure.identity.Identified;
@@ -113,6 +115,29 @@ public interface Player extends
   Optional<ModInfo> getModInfo();
 
   /**
+   * Returns the latest client mod information collected by Velocity.
+   *
+   * @return the current immutable client mod information snapshot
+   * @since 4.2.1
+   */
+  default ClientModInfo getClientModInfo() {
+    return ClientModInfo.empty();
+  }
+
+  /**
+   * Requests an installed-mods scan from Lunar Client, when available, and returns the resulting
+   * client information snapshot. The future completes when Lunar responds or after a short timeout.
+   * Native Forge, brand, and channel information is collected independently and is also available
+   * through {@link #getClientModInfo()} and {@code PlayerClientModInfoEvent}.
+   *
+   * @return a future containing the latest snapshot
+   * @since 4.2.1
+   */
+  default CompletableFuture<ClientModInfo> requestClientModInfo() {
+    return CompletableFuture.completedFuture(getClientModInfo());
+  }
+
+  /**
    * Gets the player's estimated ping in milliseconds.
    *
    * @return the player's ping or -1 if ping information is currently unknown
@@ -125,6 +150,16 @@ public interface Player extends
    * @return true if the player is authenticated with Mojang servers
    */
   boolean isOnlineMode();
+
+  /** Returns the identity mode selected by Velocity and its current proxy authentication state. */
+  default com.velocitypowered.api.auth.AuthIdentity getAuthIdentity() {
+    var type = isOnlineMode() ? com.velocitypowered.api.auth.AccountType.PREMIUM
+        : com.velocitypowered.api.auth.AccountType.OFFLINE;
+    var state = isOnlineMode() ? com.velocitypowered.api.auth.AuthState.AUTHENTICATED
+        : com.velocitypowered.api.auth.AuthState.OFFLINE_AUTHENTICATING;
+    return new com.velocitypowered.api.auth.AuthIdentity(getUniqueId(), getUniqueId(),
+        getUsername(), type, state);
+  }
 
   /**
    * Creates a new connection request so that the player can connect to another server.
@@ -466,15 +501,26 @@ public interface Player extends
   /**
    * {@inheritDoc}
    *
-   * <b>This method is not currently implemented in Velocity
-   * and will not perform any actions.</b>
+   * <b>Adventure {@link DialogLike} serialization is not implemented.</b>
+   * Use {@link #showDialogNbt(net.kyori.adventure.nbt.CompoundBinaryTag)} to send a protocol-native
+   * inline dialog on Minecraft 1.21.11.
    *
    * @see <a href="https://docs.papermc.io/velocity/dev/pitfalls/#audience-operations-are-not-fully-supported">
    *     Unsupported Adventure Operations</a>
    */
   @Override
   default void showDialog(@NotNull DialogLike dialog) {
+    throw new UnsupportedOperationException("Adventure DialogLike serialization is not available");
   }
+
+  /**
+   * Shows a dialog from its inline NBT representation. This avoids requiring the dialog to be
+   * present in the client's dialog registry.
+   *
+   * @param dialogNbt an NBT compound containing a valid dialog definition
+   * @sinceMinecraft 1.21.11
+   */
+  void showDialogNbt(@NotNull net.kyori.adventure.nbt.CompoundBinaryTag dialogNbt);
 
   /**
    * {@inheritDoc}
@@ -487,6 +533,7 @@ public interface Player extends
    */
   @Override
   default void closeDialog() {
+    throw new UnsupportedOperationException("Dialogs are not implemented by this proxy");
   }
 
   /**

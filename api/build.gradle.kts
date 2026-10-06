@@ -34,6 +34,7 @@ dependencies {
     api("net.kyori:adventure-text-minimessage")
     api("net.kyori:adventure-text-logger-slf4j")
     api("net.kyori:adventure-text-serializer-ansi")
+    api("net.kyori:adventure-nbt")
 
     api(libs.snakeyaml)
 

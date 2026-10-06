@@ -23,6 +23,7 @@ import com.google.common.collect.ImmutableList;
 import com.mojang.brigadier.suggestion.Suggestion;
 import com.velocitypowered.api.event.connection.PluginMessageEvent;
 import com.velocitypowered.api.event.player.CookieReceiveEvent;
+import com.velocitypowered.api.event.player.CustomClickActionEvent;
 import com.velocitypowered.api.event.player.PlayerChannelRegisterEvent;
 import com.velocitypowered.api.event.player.PlayerChannelUnregisterEvent;
 import com.velocitypowered.api.event.player.PlayerClientBrandEvent;
@@ -48,9 +49,11 @@ import com.velocitypowered.proxy.protocol.packet.ClientSettingsPacket;
 import com.velocitypowered.proxy.protocol.packet.JoinGamePacket;
 import com.velocitypowered.proxy.protocol.packet.KeepAlivePacket;
 import com.velocitypowered.proxy.protocol.packet.PluginMessagePacket;
+import com.velocitypowered.proxy.protocol.identity.AuthIdentityProtocol;
 import com.velocitypowered.proxy.protocol.packet.ResourcePackResponsePacket;
 import com.velocitypowered.proxy.protocol.packet.RespawnPacket;
 import com.velocitypowered.proxy.protocol.packet.ServerboundCookieResponsePacket;
+import com.velocitypowered.proxy.protocol.packet.ServerboundCustomClickActionPacket;
 import com.velocitypowered.proxy.protocol.packet.ServerboundPlayerLoadedPacket;
 import com.velocitypowered.proxy.protocol.packet.TabCompleteRequestPacket;
 import com.velocitypowered.proxy.protocol.packet.TabCompleteResponsePacket;
@@ -357,6 +360,22 @@ public class ClientPlaySessionHandler implements MinecraftSessionHandler {
 
   @Override
   public boolean handle(PluginMessagePacket packet) {
+    if (AuthIdentityProtocol.isIdentityChannel(packet.getChannel())) {
+      logger.debug("Discarding client-originated auth identity request from {}", player.getUsername());
+      return true;
+    }
+    if (player.getClientModInfoTracker()
+        .handlePluginMessage(packet.getChannel(), packet.content())) {
+      return true;
+    }
+    if (PluginMessageUtil.isRegister(packet)) {
+      player.getClientModInfoTracker().recordChannels(
+          PluginMessageUtil.getChannels(player.getClientsideChannels().size(), packet,
+              player.getProtocolVersion()), true);
+    } else if (PluginMessageUtil.isUnregister(packet)) {
+      player.getClientModInfoTracker().recordChannels(
+          PluginMessageUtil.getChannels(0, packet, player.getProtocolVersion()), false);
+    }
     // Handling edge case when packet with FML client handshake (state COMPLETE)
     // arrives after JoinGame packet from destination server
     VelocityServerConnection serverConn =
@@ -510,6 +529,21 @@ public class ClientPlaySessionHandler implements MinecraftSessionHandler {
           }
         }, player.getConnection().eventLoop());
 
+    return true;
+  }
+
+  @Override
+  public boolean handle(ServerboundCustomClickActionPacket packet) {
+    var event = new CustomClickActionEvent(player, packet.getAction(), packet.getPayload());
+    server.getEventManager().fire(event)
+        .thenAcceptAsync(result -> {
+          if (result.getResult().isAllowed()) {
+            final VelocityServerConnection serverConnection = player.getConnectedServer();
+            if (serverConnection != null)
+              serverConnection.ensureConnected().write(packet.retain());
+          }
+        }, player.getConnection().eventLoop())
+        .whenComplete((ignored, failure) -> event.clearPayload());
     return true;
   }
 

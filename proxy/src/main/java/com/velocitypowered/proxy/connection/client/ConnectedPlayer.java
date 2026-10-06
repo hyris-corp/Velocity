@@ -24,6 +24,9 @@ import static java.util.concurrent.CompletableFuture.completedFuture;
 
 import com.google.common.base.Preconditions;
 import com.google.gson.JsonObject;
+import com.velocitypowered.api.auth.AccountType;
+import com.velocitypowered.api.auth.AuthIdentity;
+import com.velocitypowered.api.auth.AuthState;
 import com.velocitypowered.api.event.connection.DisconnectEvent;
 import com.velocitypowered.api.event.connection.DisconnectEvent.LoginStatus;
 import com.velocitypowered.api.event.connection.PreTransferEvent;
@@ -56,6 +59,7 @@ import com.velocitypowered.api.proxy.player.ResourcePackInfo;
 import com.velocitypowered.api.proxy.server.RegisteredServer;
 import com.velocitypowered.api.util.GameProfile;
 import com.velocitypowered.api.util.ModInfo;
+import com.velocitypowered.api.util.ClientModInfo;
 import com.velocitypowered.api.util.ServerLink;
 import com.velocitypowered.proxy.VelocityServer;
 import com.velocitypowered.proxy.adventure.VelocityBossBarImplementation;
@@ -78,6 +82,8 @@ import com.velocitypowered.proxy.protocol.packet.ClientboundSoundEntityPacket;
 import com.velocitypowered.proxy.protocol.packet.ClientboundStopSoundPacket;
 import com.velocitypowered.proxy.protocol.packet.ClientboundStoreCookiePacket;
 import com.velocitypowered.proxy.protocol.packet.DisconnectPacket;
+import com.velocitypowered.proxy.protocol.packet.DialogClearPacket;
+import com.velocitypowered.proxy.protocol.packet.DialogShowPacket;
 import com.velocitypowered.proxy.protocol.packet.HeaderAndFooterPacket;
 import com.velocitypowered.proxy.protocol.packet.KeepAlivePacket;
 import com.velocitypowered.proxy.protocol.packet.PluginMessagePacket;
@@ -116,9 +122,11 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import net.kyori.adventure.bossbar.BossBar;
+import net.kyori.adventure.nbt.CompoundBinaryTag;
 import net.kyori.adventure.identity.Identity;
 import net.kyori.adventure.key.Key;
 import net.kyori.adventure.permission.PermissionChecker;
@@ -178,6 +186,8 @@ public class ConnectedPlayer implements MinecraftConnectionAssociation, Player, 
   private int tryIndex = 0;
   private long ping = -1;
   private final boolean onlineMode;
+  private final UUID authenticatedUuid;
+  private volatile AuthState authState;
   private @Nullable VelocityServerConnection connectedServer;
   private @Nullable VelocityServerConnection connectionInFlight;
   private @Nullable PlayerSettings settings;
@@ -193,6 +203,7 @@ public class ConnectedPlayer implements MinecraftConnectionAssociation, Player, 
   private @MonotonicNonNull List<String> serversToTry = null;
   private final ResourcePackHandler resourcePackHandler;
   private final BundleDelimiterHandler bundleHandler = new BundleDelimiterHandler(this);
+  private final ClientModInfoTracker clientModInfoTracker;
 
   private @Nullable String clientBrand;
   private @Nullable Locale effectiveLocale;
@@ -204,7 +215,7 @@ public class ConnectedPlayer implements MinecraftConnectionAssociation, Player, 
 
   ConnectedPlayer(VelocityServer server, GameProfile profile, MinecraftConnection connection,
                   @Nullable InetSocketAddress virtualHost, @Nullable String rawVirtualHost, boolean onlineMode,
-                  HandshakeIntent handshakeIntent, @Nullable IdentifiedKey playerKey) {
+                  UUID authenticatedUuid, HandshakeIntent handshakeIntent, @Nullable IdentifiedKey playerKey) {
     this.server = server;
     this.profile = profile;
     this.connection = connection;
@@ -214,7 +225,10 @@ public class ConnectedPlayer implements MinecraftConnectionAssociation, Player, 
     this.permissionFunction = PermissionFunction.ALWAYS_UNDEFINED;
     this.connectionPhase = connection.getType().getInitialClientPhase();
     this.onlineMode = onlineMode;
+    this.authenticatedUuid = authenticatedUuid;
+    this.authState = onlineMode ? AuthState.AUTHENTICATED : AuthState.OFFLINE_AUTHENTICATING;
     this.clientsideChannels = CappedSet.create(MAX_CLIENTSIDE_PLUGIN_CHANNELS);
+    this.clientModInfoTracker = new ClientModInfoTracker(this, server);
 
     if (connection.getProtocolVersion().noLessThan(ProtocolVersion.MINECRAFT_1_19_3)) {
       this.tabList = new VelocityTabList(this);
@@ -234,6 +248,7 @@ public class ConnectedPlayer implements MinecraftConnectionAssociation, Player, 
    * Used for cleaning up resources during a disconnection.
    */
   public void disconnected() {
+    authState = AuthState.CLOSED;
     for (final VelocityBossBarImplementation bar : this.bossBars) {
       bar.viewerDisconnected(this);
     }
@@ -332,6 +347,17 @@ public class ConnectedPlayer implements MinecraftConnectionAssociation, Player, 
   }
 
   @Override
+  public AuthIdentity getAuthIdentity() {
+    return new AuthIdentity(getUniqueId(), authenticatedUuid, getUsername(),
+        onlineMode ? AccountType.PREMIUM : AccountType.OFFLINE, authState);
+  }
+
+  void completeOfflineAuthenticationAtBackendAdmission() {
+    if (!onlineMode && authState != AuthState.CLOSED)
+      authState = AuthState.AUTHENTICATED;
+  }
+
+  @Override
   public PlayerSettings getPlayerSettings() {
     return settings == null ? ClientSettingsWrapper.DEFAULT : this.settings;
   }
@@ -363,8 +389,23 @@ public class ConnectedPlayer implements MinecraftConnectionAssociation, Player, 
     return Optional.ofNullable(modInfo);
   }
 
+  @Override
+  public ClientModInfo getClientModInfo() {
+    return clientModInfoTracker.snapshot();
+  }
+
+  @Override
+  public CompletableFuture<ClientModInfo> requestClientModInfo() {
+    return clientModInfoTracker.request();
+  }
+
+  ClientModInfoTracker getClientModInfoTracker() {
+    return clientModInfoTracker;
+  }
+
   public void setModInfo(ModInfo modInfo) {
     this.modInfo = modInfo;
+    clientModInfoTracker.recordForgeMods(modInfo);
     server.getEventManager().fireAndForget(new PlayerModInfoEvent(this, modInfo));
   }
 
@@ -912,6 +953,9 @@ public class ConnectedPlayer implements MinecraftConnectionAssociation, Player, 
   public void setConnectedServer(@Nullable VelocityServerConnection serverConnection) {
     this.connectedServer = serverConnection;
     this.tryIndex = 0; // reset since we got connected to a server
+    if (serverConnection != null) {
+      completeOfflineAuthenticationAtBackendAdmission();
+    }
 
     if (serverConnection == connectionInFlight) {
       connectionInFlight = null;
@@ -1026,6 +1070,9 @@ public class ConnectedPlayer implements MinecraftConnectionAssociation, Player, 
 
   void setClientBrand(final @Nullable String clientBrand) {
     this.clientBrand = clientBrand;
+    if (clientBrand != null) {
+      clientModInfoTracker.recordBrand(clientBrand);
+    }
   }
 
   @Override
@@ -1155,6 +1202,27 @@ public class ConnectedPlayer implements MinecraftConnectionAssociation, Player, 
                 .orElse(null),
             l.getUrl().toString()))
         .toList()));
+  }
+
+  @Override
+  public void showDialogNbt(@NotNull CompoundBinaryTag dialogNbt) {
+    Preconditions.checkNotNull(dialogNbt, "dialogNbt");
+    Preconditions.checkArgument(getProtocolVersion().equals(ProtocolVersion.MINECRAFT_1_21_11),
+        "Inline dialogs are currently supported for Minecraft 1.21.11 only");
+    Preconditions.checkArgument(connection.getState() == StateRegistry.PLAY
+            || connection.getState() == StateRegistry.CONFIG,
+        "Dialogs may only be sent in Configuration or Play");
+    connection.write(new DialogShowPacket(connection.getState(), dialogNbt));
+  }
+
+  @Override
+  public void closeDialog() {
+    Preconditions.checkArgument(getProtocolVersion().equals(ProtocolVersion.MINECRAFT_1_21_11),
+        "Inline dialogs are currently supported for Minecraft 1.21.11 only");
+    Preconditions.checkArgument(connection.getState() == StateRegistry.PLAY
+            || connection.getState() == StateRegistry.CONFIG,
+        "Dialogs may only be cleared in Configuration or Play");
+    connection.write(DialogClearPacket.INSTANCE);
   }
 
   @Override

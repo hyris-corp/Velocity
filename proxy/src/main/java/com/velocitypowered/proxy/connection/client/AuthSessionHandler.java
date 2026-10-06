@@ -66,6 +66,7 @@ public class AuthSessionHandler implements MinecraftSessionHandler {
   private final MinecraftConnection mcConnection;
   private final LoginInboundConnection inbound;
   private GameProfile profile;
+  private final UUID authenticatedUuid;
   private @MonotonicNonNull ConnectedPlayer connectedPlayer;
   private final boolean onlineMode;
   private State loginState = State.START; // 1.20.2+
@@ -76,6 +77,7 @@ public class AuthSessionHandler implements MinecraftSessionHandler {
     this.server = Preconditions.checkNotNull(server, "server");
     this.inbound = Preconditions.checkNotNull(inbound, "inbound");
     this.profile = Preconditions.checkNotNull(profile, "profile");
+    this.authenticatedUuid = profile.getId();
     this.onlineMode = onlineMode;
     this.mcConnection = inbound.delegatedConnection();
     this.serverIdHash = serverIdHash;
@@ -96,9 +98,17 @@ public class AuthSessionHandler implements MinecraftSessionHandler {
         return CompletableFuture.completedFuture(null);
       }
 
+      if (onlineMode && !authenticatedUuid.equals(profileEvent.getGameProfile().getId())) {
+        logger.warn("Refusing GameProfile UUID change for authenticated premium player {}",
+            profile.getName());
+        inbound.disconnect(Component.translatable("velocity.error.online-mode-only", NamedTextColor.RED));
+        return CompletableFuture.completedFuture(null);
+      }
+
       // Initiate a regular connection and move over to it.
       ConnectedPlayer player = new ConnectedPlayer(server, profileEvent.getGameProfile(),
           mcConnection, inbound.getVirtualHost().orElse(null), inbound.getRawVirtualHost().orElse(null), onlineMode,
+          authenticatedUuid,
           inbound.getHandshakeIntent(), inbound.getIdentifiedKey());
       this.connectedPlayer = player;
       if (!server.canRegisterConnection(player)) {
@@ -230,6 +240,13 @@ public class AuthSessionHandler implements MinecraftSessionHandler {
         if (!server.registerConnection(player)) {
           player.disconnect0(Component.translatable("velocity.error.already-connected-proxy"), true);
           return;
+        }
+
+        if (onlineMode) {
+          logger.info("Player {} authenticated as PREMIUM (UUID {})", player.getUsername(), authenticatedUuid);
+        } else {
+          logger.info("Player {} connected as OFFLINE (UUID {}); account password authentication is pending",
+              player.getUsername(), authenticatedUuid);
         }
 
         ServerLoginSuccessPacket success = new ServerLoginSuccessPacket();

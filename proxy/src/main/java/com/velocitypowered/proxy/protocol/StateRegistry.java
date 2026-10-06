@@ -42,6 +42,7 @@ import static com.velocitypowered.api.network.ProtocolVersion.MINECRAFT_1_21_4;
 import static com.velocitypowered.api.network.ProtocolVersion.MINECRAFT_1_21_5;
 import static com.velocitypowered.api.network.ProtocolVersion.MINECRAFT_1_21_6;
 import static com.velocitypowered.api.network.ProtocolVersion.MINECRAFT_1_21_9;
+import static com.velocitypowered.api.network.ProtocolVersion.MINECRAFT_1_21_11;
 import static com.velocitypowered.api.network.ProtocolVersion.MINECRAFT_1_7_2;
 import static com.velocitypowered.api.network.ProtocolVersion.MINECRAFT_1_8;
 import static com.velocitypowered.api.network.ProtocolVersion.MINECRAFT_1_9;
@@ -434,6 +435,8 @@ public enum StateRegistry {
           map(0x0E, MINECRAFT_1_21_2, false),
           map(0x0F, MINECRAFT_1_21_6, false),
           map(0x10, MINECRAFT_26_1, false));
+      serverbound.register(ServerboundCustomClickActionPacket.class, ServerboundCustomClickActionPacket::new,
+          map(0x41, MINECRAFT_1_21_11, MINECRAFT_1_21_11, false));
 
       clientbound.register(
           BossBarPacket.class,
@@ -883,6 +886,10 @@ public enum StateRegistry {
           map(0x87, MINECRAFT_1_21_9, false),
           map(0x89, MINECRAFT_26_1, false),
           map(0x8C, MINECRAFT_26_3, false));
+      clientbound.register(DialogClearPacket.class, () -> DialogClearPacket.INSTANCE,
+          map(0x89, MINECRAFT_1_21_11, MINECRAFT_1_21_11, false));
+      clientbound.register(DialogShowPacket.class, () -> new DialogShowPacket(this),
+          map(0x8A, MINECRAFT_1_21_11, MINECRAFT_1_21_11, false));
     }
   },
   LOGIN {

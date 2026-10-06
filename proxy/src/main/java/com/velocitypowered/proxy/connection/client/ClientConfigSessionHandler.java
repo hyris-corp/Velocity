@@ -19,6 +19,7 @@ package com.velocitypowered.proxy.connection.client;
 
 import com.velocitypowered.api.event.connection.PluginMessageEvent;
 import com.velocitypowered.api.event.player.CookieReceiveEvent;
+import com.velocitypowered.api.event.player.CustomClickActionEvent;
 import com.velocitypowered.api.event.player.PlayerClientBrandEvent;
 import com.velocitypowered.api.event.player.configuration.PlayerConfigurationEvent;
 import com.velocitypowered.api.event.player.configuration.PlayerFinishConfigurationEvent;
@@ -39,6 +40,7 @@ import com.velocitypowered.proxy.protocol.packet.ClientSettingsPacket;
 import com.velocitypowered.proxy.protocol.packet.KeepAlivePacket;
 import com.velocitypowered.proxy.protocol.packet.PingIdentifyPacket;
 import com.velocitypowered.proxy.protocol.packet.PluginMessagePacket;
+import com.velocitypowered.proxy.protocol.identity.AuthIdentityProtocol;
 import com.velocitypowered.proxy.protocol.packet.ResourcePackResponsePacket;
 import com.velocitypowered.proxy.protocol.packet.ServerboundCookieResponsePacket;
 import com.velocitypowered.proxy.protocol.packet.ServerboundCustomClickActionPacket;
@@ -125,6 +127,14 @@ public class ClientConfigSessionHandler implements MinecraftSessionHandler {
 
   @Override
   public boolean handle(final PluginMessagePacket packet) {
+    if (AuthIdentityProtocol.isIdentityChannel(packet.getChannel())) {
+      logger.debug("Discarding client-originated auth identity request from {}", player.getUsername());
+      return true;
+    }
+    if (player.getClientModInfoTracker()
+        .handlePluginMessage(packet.getChannel(), packet.content())) {
+      return true;
+    }
     final VelocityServerConnection serverConn = player.getConnectionInFlight();
     if (PluginMessageUtil.isMcBrand(packet)) {
       final String brand = PluginMessageUtil.readBrandMessage(packet.content());
@@ -213,13 +223,17 @@ public class ClientConfigSessionHandler implements MinecraftSessionHandler {
 
   @Override
   public boolean handle(ServerboundCustomClickActionPacket packet) {
-    VelocityServerConnection serverConnection = player.getConnectionInFlightOrConnectedServer();
-    if (serverConnection != null) {
-      serverConnection.ensureConnected().write(packet.retain());
-      return true;
-    }
-
-    return false;
+    var event = new CustomClickActionEvent(player, packet.getAction(), packet.getPayload());
+    server.getEventManager().fire(event)
+        .thenAcceptAsync(result -> {
+          if (result.getResult().isAllowed()) {
+            VelocityServerConnection serverConnection = player.getConnectionInFlightOrConnectedServer();
+            if (serverConnection != null)
+              serverConnection.ensureConnected().write(packet.retain());
+          }
+        }, player.getConnection().eventLoop())
+        .whenComplete((ignored, failure) -> event.clearPayload());
+    return true;
   }
 
   @Override

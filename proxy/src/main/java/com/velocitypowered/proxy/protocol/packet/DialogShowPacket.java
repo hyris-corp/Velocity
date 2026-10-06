@@ -26,6 +26,7 @@ import com.velocitypowered.proxy.protocol.StateRegistry;
 import io.netty.buffer.ByteBuf;
 import net.kyori.adventure.nbt.BinaryTag;
 import net.kyori.adventure.nbt.BinaryTagIO;
+import net.kyori.adventure.nbt.CompoundBinaryTag;
 
 public class DialogShowPacket implements MinecraftPacket {
 
@@ -35,6 +36,12 @@ public class DialogShowPacket implements MinecraftPacket {
 
   public DialogShowPacket(final StateRegistry state) {
     this.state = state;
+  }
+
+  public DialogShowPacket(final StateRegistry state, final CompoundBinaryTag nbt) {
+    this.state = state;
+    this.id = 0;
+    this.nbt = nbt;
   }
 
   @Override
