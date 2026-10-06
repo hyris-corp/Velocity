@@ -180,7 +180,7 @@ public class InitialLoginSessionHandler implements MinecraftSessionHandler {
             if (failure != null) {
               logger.warn("Unable to resolve official profile for {}", login.getUsername(), failure);
               mcConnection.eventLoop().execute(() -> inbound.disconnect(
-                  Component.translatable("multiplayer.disconnect.authservers_down")));
+                  Component.translatable("hyris.error.authservers-down")));
               return;
             }
 
@@ -431,7 +431,7 @@ public class InitialLoginSessionHandler implements MinecraftSessionHandler {
 
             if (throwable != null) {
               logger.error("Unable to authenticate player", throwable);
-              inbound.disconnect(Component.translatable("multiplayer.disconnect.authservers_down"));
+              inbound.disconnect(Component.translatable("hyris.error.authservers-down"));
               return;
             }
 
@@ -459,7 +459,12 @@ public class InitialLoginSessionHandler implements MinecraftSessionHandler {
               logger.error(
                   "Got an unexpected error code {} whilst contacting Mojang to log in {} ({})",
                   response.statusCode(), login.getUsername(), playerIp);
-              inbound.disconnect(Component.translatable("multiplayer.disconnect.authservers_down"));
+              if (response.statusCode() == 403) {
+                inbound.disconnect(Component.translatable("velocity.error.online-mode-only"));
+              } else {
+                inbound.disconnect(Component.translatable("hyris.error.authservers-down-status",
+                    Component.text(response.statusCode())));
+              }
             }
           }, mcConnection.eventLoop())
           .whenComplete((ignored, throwable) -> {

@@ -306,8 +306,7 @@ public class AuthSessionHandler implements MinecraftSessionHandler {
               }
               if (configuration.isResourcePackRequired()
                       && (failure != null || !Boolean.TRUE.equals(applied))) {
-                player.disconnect0(Component.text("The required resource pack could not be applied.",
-                        NamedTextColor.RED), true);
+                player.disconnect0(Component.translatable("hyris.error.required-resource-pack"), true);
               }
             }, mcConnection.eventLoop());
     firePostLogin(player);
