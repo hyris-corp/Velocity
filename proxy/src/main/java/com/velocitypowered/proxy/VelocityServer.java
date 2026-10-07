@@ -33,6 +33,7 @@ import com.velocitypowered.api.plugin.PluginDescription;
 import com.velocitypowered.api.plugin.PluginManager;
 import com.velocitypowered.api.proxy.Player;
 import com.velocitypowered.api.proxy.ProxyServer;
+import com.velocitypowered.api.proxy.messages.MinecraftChannelIdentifier;
 import com.velocitypowered.api.proxy.player.ResourcePackInfo;
 import com.velocitypowered.api.proxy.server.RegisteredServer;
 import com.velocitypowered.api.proxy.server.ServerInfo;
@@ -59,6 +60,7 @@ import com.velocitypowered.proxy.plugin.loader.VelocityPluginContainer;
 import com.velocitypowered.proxy.plugin.loader.VelocityPluginDescription;
 import com.velocitypowered.proxy.plugin.virtual.VelocityVirtualPlugin;
 import com.velocitypowered.proxy.protocol.ProtocolUtils;
+import com.velocitypowered.proxy.protocol.identity.LobbyAvailabilityProtocol;
 import com.velocitypowered.proxy.protocol.util.FaviconSerializer;
 import com.velocitypowered.proxy.protocol.util.GameProfileSerializer;
 import com.velocitypowered.proxy.scheduler.VelocityScheduler;
@@ -165,6 +167,7 @@ public class VelocityServer implements ProxyServer, ForwardingAudience {
 
   private final Map<UUID, ConnectedPlayer> connectionsByUuid = new ConcurrentHashMap<>();
   private final Map<String, ConnectedPlayer> connectionsByName = new ConcurrentHashMap<>();
+  private final Map<String, Boolean> lobbyAvailability = new ConcurrentHashMap<>();
   private final Object sessionIdLock = new Object();
   private volatile @Nullable UUID sessionId;
   private final VelocityConsole console;
@@ -184,8 +187,17 @@ public class VelocityServer implements ProxyServer, ForwardingAudience {
     console = new VelocityConsole(this);
     cm = new ConnectionManager(this);
     servers = new ServerMap(this);
+    channelRegistrar.register(MinecraftChannelIdentifier.from(LobbyAvailabilityProtocol.CHANNEL));
     serverListPingHandler = new ServerListPingHandler(this);
     this.options = options;
+  }
+
+  public boolean hasAvailableLobby() {
+    return lobbyAvailability.values().stream().anyMatch(Boolean.TRUE::equals);
+  }
+
+  public void updateLobbyAvailability(String serverName, boolean available) {
+    lobbyAvailability.put(serverName, available);
   }
 
   public KeyPair getServerKeyPair() {

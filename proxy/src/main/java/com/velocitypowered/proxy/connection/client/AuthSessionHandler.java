@@ -286,7 +286,7 @@ public class AuthSessionHandler implements MinecraftSessionHandler {
 
   private void startPostLogin(ConnectedPlayer player) {
     final VelocityConfiguration configuration = server.getConfiguration();
-    if (!configuration.isResourcePackEnabled()) {
+    if (!configuration.isResourcePackEnabled() || !server.hasAvailableLobby()) {
       firePostLogin(player);
       return;
     }
