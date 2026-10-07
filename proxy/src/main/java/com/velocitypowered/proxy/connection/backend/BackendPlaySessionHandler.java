@@ -124,6 +124,9 @@ public class BackendPlaySessionHandler implements MinecraftSessionHandler {
   @Override
   public void activated() {
     serverConn.getServer().addPlayer(serverConn.getPlayer());
+    serverConn.sendPluginMessage(
+        com.velocitypowered.api.proxy.messages.MinecraftChannelIdentifier.from(
+            LobbyAvailabilityProtocol.CHANNEL), LobbyAvailabilityProtocol.request());
 
     MinecraftConnection serverMc = serverConn.ensureConnected();
     if (server.getConfiguration().isBungeePluginChannelEnabled()) {
@@ -303,7 +306,8 @@ public class BackendPlaySessionHandler implements MinecraftSessionHandler {
     if (AuthIdentityProtocol.handle(serverConn, packet)) {
       return true;
     }
-    if (LobbyAvailabilityProtocol.handle(serverConn, packet, server::updateLobbyAvailability)) {
+    if (LobbyAvailabilityProtocol.handle(serverConn, packet, server::updateLobbyAvailability,
+        server::completeLobbyAvailabilityRequest)) {
       return true;
     }
     if (bungeecordMessageResponder.process(packet)) {

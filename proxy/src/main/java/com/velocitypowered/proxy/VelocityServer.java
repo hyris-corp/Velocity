@@ -97,6 +97,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.IntFunction;
@@ -168,6 +169,7 @@ public class VelocityServer implements ProxyServer, ForwardingAudience {
   private final Map<UUID, ConnectedPlayer> connectionsByUuid = new ConcurrentHashMap<>();
   private final Map<String, ConnectedPlayer> connectionsByName = new ConcurrentHashMap<>();
   private final Map<String, Boolean> lobbyAvailability = new ConcurrentHashMap<>();
+  private final Map<String, CompletableFuture<Boolean>> lobbyAvailabilityRequests = new ConcurrentHashMap<>();
   private final Object sessionIdLock = new Object();
   private volatile @Nullable UUID sessionId;
   private final VelocityConsole console;
@@ -196,8 +198,31 @@ public class VelocityServer implements ProxyServer, ForwardingAudience {
     return lobbyAvailability.values().stream().anyMatch(Boolean.TRUE::equals);
   }
 
+  public CompletableFuture<Boolean> requestLobbyAvailability(
+      com.velocitypowered.api.proxy.server.RegisteredServer target, long timeout, TimeUnit unit) {
+    CompletableFuture<Boolean> response = new CompletableFuture<>();
+    String serverName = target.getServerInfo().getName();
+    lobbyAvailabilityRequests.compute(serverName, (ignored, current) -> {
+      if (current == null || current.isDone()) return response;
+      current.whenComplete((available, failure) -> {
+        if (failure == null) response.complete(available);
+        else response.completeExceptionally(failure);
+      });
+      return current;
+    });
+    response.whenComplete((ignored, failure) -> lobbyAvailabilityRequests.remove(serverName, response));
+    target.sendPluginMessage(MinecraftChannelIdentifier.from(LobbyAvailabilityProtocol.CHANNEL),
+        LobbyAvailabilityProtocol.request());
+    return response.completeOnTimeout(false, timeout, unit);
+  }
+
   public void updateLobbyAvailability(String serverName, boolean available) {
     lobbyAvailability.put(serverName, available);
+  }
+
+  public void completeLobbyAvailabilityRequest(String serverName, boolean available) {
+    var request = lobbyAvailabilityRequests.remove(serverName);
+    if (request != null) request.complete(available);
   }
 
   public KeyPair getServerKeyPair() {

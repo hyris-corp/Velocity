@@ -41,6 +41,7 @@ import com.velocitypowered.proxy.connection.backend.BungeeCordMessageResponder;
 import com.velocitypowered.proxy.connection.backend.VelocityServerConnection;
 import com.velocitypowered.proxy.connection.forge.legacy.LegacyForgeConstants;
 import com.velocitypowered.proxy.connection.player.resourcepack.ResourcePackResponseBundle;
+import com.velocitypowered.proxy.connection.player.resourcepack.VelocityResourcePackInfo;
 import com.velocitypowered.proxy.protocol.MinecraftPacket;
 import com.velocitypowered.proxy.protocol.StateRegistry;
 import com.velocitypowered.proxy.protocol.netty.MinecraftDecoder;
@@ -676,6 +677,38 @@ public class ClientPlaySessionHandler implements MinecraftSessionHandler {
    */
   public void handleBackendJoinGame(JoinGamePacket joinGame, VelocityServerConnection destination) {
     final MinecraftConnection serverMc = destination.ensureConnected();
+
+    if (!spawned && server.getConfiguration().isResourcePackEnabled()) {
+      server.requestLobbyAvailability(destination.getServer(), 30,
+          java.util.concurrent.TimeUnit.SECONDS)
+          .thenAcceptAsync(available -> {
+            if (!available || player.getConnection().isClosed()
+                || !destination.isActive()
+                || destination.getPlayer().getCurrentServer().orElse(null) != destination) {
+              return;
+            }
+            final var configuration = server.getConfiguration();
+            final var packBuilder = new VelocityResourcePackInfo.BuilderImpl(configuration.getResourcePackUrl())
+                .setShouldForce(configuration.isResourcePackRequired());
+            if (configuration.getResourcePackHash() != null) {
+              packBuilder.setHash(configuration.getResourcePackHash());
+            }
+            player.resourcePackHandler().queueResourcePackAndWait(packBuilder.build())
+                .orTimeout(120, java.util.concurrent.TimeUnit.SECONDS)
+                .whenCompleteAsync((applied, failure) -> {
+                  if (configuration.isResourcePackRequired()
+                      && (failure != null || !Boolean.TRUE.equals(applied))
+                      && !player.getConnection().isClosed()) {
+                    player.disconnect0(net.kyori.adventure.text.Component.translatable(
+                        "hyris.error.required-resource-pack"), true);
+                  }
+                }, player.getConnection().eventLoop());
+          }, player.getConnection().eventLoop())
+          .exceptionally(failure -> {
+            logger.error("Unable to determine lobby availability for {}", player, failure);
+            return null;
+          });
+    }
 
     if (!spawned) {
       // The player wasn't spawned in yet, so we don't need to do anything special. Just send
