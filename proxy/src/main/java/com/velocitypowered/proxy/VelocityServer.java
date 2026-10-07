@@ -170,6 +170,7 @@ public class VelocityServer implements ProxyServer, ForwardingAudience {
   private final Map<String, ConnectedPlayer> connectionsByName = new ConcurrentHashMap<>();
   private final Map<String, Boolean> lobbyAvailability = new ConcurrentHashMap<>();
   private final Map<String, CompletableFuture<Boolean>> lobbyAvailabilityRequests = new ConcurrentHashMap<>();
+  private static final org.apache.logging.log4j.Logger LOGGER = LogManager.getLogger(VelocityServer.class);
   private final Object sessionIdLock = new Object();
   private volatile @Nullable UUID sessionId;
   private final VelocityConsole console;
@@ -199,7 +200,8 @@ public class VelocityServer implements ProxyServer, ForwardingAudience {
   }
 
   public CompletableFuture<Boolean> requestLobbyAvailability(
-      com.velocitypowered.api.proxy.server.RegisteredServer target, long timeout, TimeUnit unit) {
+      com.velocitypowered.proxy.connection.backend.VelocityServerConnection target,
+      long timeout, TimeUnit unit) {
     CompletableFuture<Boolean> response = new CompletableFuture<>();
     String serverName = target.getServerInfo().getName();
     lobbyAvailabilityRequests.compute(serverName, (ignored, current) -> {
@@ -223,6 +225,46 @@ public class VelocityServer implements ProxyServer, ForwardingAudience {
   public void completeLobbyAvailabilityRequest(String serverName, boolean available) {
     var request = lobbyAvailabilityRequests.remove(serverName);
     if (request != null) request.complete(available);
+  }
+
+  public void requestLobbyResourcePack(
+      com.velocitypowered.proxy.connection.client.ConnectedPlayer player,
+      com.velocitypowered.proxy.connection.backend.VelocityServerConnection connection) {
+    if (!getConfiguration().isResourcePackEnabled() || !player.markProxyResourcePackQueued()) return;
+    requestLobbyAvailability(connection, 30, TimeUnit.SECONDS)
+        .thenAcceptAsync(available -> {
+          if (!available || player.getConnection().isClosed() || !connection.isActive()) return;
+          boolean proxyPackExists = player.resourcePackHandler().getPendingResourcePacks().stream()
+              .anyMatch(pack -> pack.getOrigin()
+                  == com.velocitypowered.api.proxy.player.ResourcePackInfo.Origin.PLUGIN_ON_PROXY)
+              || player.resourcePackHandler().getAppliedResourcePacks().stream()
+              .anyMatch(pack -> pack.getOrigin()
+                  == com.velocitypowered.api.proxy.player.ResourcePackInfo.Origin.PLUGIN_ON_PROXY);
+          if (proxyPackExists) return;
+
+          var configuration = getConfiguration();
+          var packBuilder = new com.velocitypowered.proxy.connection.player.resourcepack
+              .VelocityResourcePackInfo.BuilderImpl(configuration.getResourcePackUrl())
+              .setShouldForce(configuration.isResourcePackRequired());
+          if (configuration.getResourcePackHash() != null) {
+            packBuilder.setHash(configuration.getResourcePackHash());
+          }
+          player.resourcePackHandler().queueResourcePackAndWait(packBuilder.build())
+              .orTimeout(120, TimeUnit.SECONDS)
+              .whenCompleteAsync((applied, failure) -> {
+                if (configuration.isResourcePackRequired()
+                    && (failure != null || !Boolean.TRUE.equals(applied))
+                    && !player.getConnection().isClosed()) {
+                  player.disconnect0(net.kyori.adventure.text.Component.translatable(
+                      "hyris.error.required-resource-pack"), true);
+                }
+              }, player.getConnection().eventLoop());
+        }, player.getConnection().eventLoop())
+        .exceptionally(failure -> {
+          LOGGER.error(
+              "Unable to determine lobby availability for {}", player, failure);
+          return null;
+        });
   }
 
   public KeyPair getServerKeyPair() {

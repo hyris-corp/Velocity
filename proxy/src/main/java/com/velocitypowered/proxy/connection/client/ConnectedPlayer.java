@@ -202,6 +202,8 @@ public class ConnectedPlayer implements MinecraftConnectionAssociation, Player, 
   private final CompletableFuture<Void> teardownFuture = new CompletableFuture<>();
   private @MonotonicNonNull List<String> serversToTry = null;
   private final ResourcePackHandler resourcePackHandler;
+  private final java.util.concurrent.atomic.AtomicBoolean proxyResourcePackQueued =
+      new java.util.concurrent.atomic.AtomicBoolean();
   private final BundleDelimiterHandler bundleHandler = new BundleDelimiterHandler(this);
   private final ClientModInfoTracker clientModInfoTracker;
 
@@ -1275,6 +1277,10 @@ public class ConnectedPlayer implements MinecraftConnectionAssociation, Player, 
    */
   public ResourcePackHandler resourcePackHandler() {
     return this.resourcePackHandler;
+  }
+
+  public boolean markProxyResourcePackQueued() {
+    return proxyResourcePackQueued.compareAndSet(false, true);
   }
 
   @Override

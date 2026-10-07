@@ -124,9 +124,6 @@ public class BackendPlaySessionHandler implements MinecraftSessionHandler {
   @Override
   public void activated() {
     serverConn.getServer().addPlayer(serverConn.getPlayer());
-    serverConn.sendPluginMessage(
-        com.velocitypowered.api.proxy.messages.MinecraftChannelIdentifier.from(
-            LobbyAvailabilityProtocol.CHANNEL), LobbyAvailabilityProtocol.request());
 
     MinecraftConnection serverMc = serverConn.ensureConnected();
     if (server.getConfiguration().isBungeePluginChannelEnabled()) {

@@ -250,6 +250,9 @@ public class ConfigSessionHandler implements MinecraftSessionHandler {
       } else {
         smc.setActiveSessionHandler(StateRegistry.PLAY, new TransitionSessionHandler(server, serverConn, resultFuture));
       }
+      if (serverConn != player.getConnectedServer()) {
+        server.requestLobbyResourcePack(player, serverConn);
+      }
       if (player.resourcePackHandler().getFirstAppliedPack() == null && resourcePackToApply != null) {
         player.resourcePackHandler().queueResourcePack(resourcePackToApply);
       }

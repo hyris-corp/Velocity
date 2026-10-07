@@ -290,24 +290,6 @@ public class AuthSessionHandler implements MinecraftSessionHandler {
       firePostLogin(player);
       return;
     }
-    final VelocityResourcePackInfo.BuilderImpl packBuilder = new VelocityResourcePackInfo.BuilderImpl(
-            configuration.getResourcePackUrl())
-            .setShouldForce(configuration.isResourcePackRequired());
-    if (configuration.getResourcePackHash() != null) {
-      packBuilder.setHash(configuration.getResourcePackHash());
-    }
-
-    player.resourcePackHandler().queueResourcePackAndWait(packBuilder.build())
-            .orTimeout(120, TimeUnit.SECONDS)
-            .whenCompleteAsync((applied, failure) -> {
-              if (mcConnection.isClosed()) {
-                return;
-              }
-              if (configuration.isResourcePackRequired()
-                      && (failure != null || !Boolean.TRUE.equals(applied))) {
-                player.disconnect0(Component.translatable("hyris.error.required-resource-pack"), true);
-              }
-            }, mcConnection.eventLoop());
     firePostLogin(player);
   }
 

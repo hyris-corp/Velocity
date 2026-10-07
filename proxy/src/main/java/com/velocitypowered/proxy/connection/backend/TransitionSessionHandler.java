@@ -188,6 +188,11 @@ public class TransitionSessionHandler implements MinecraftSessionHandler {
 
   @Override
   public boolean handle(PluginMessagePacket packet) {
+    if (com.velocitypowered.proxy.protocol.identity.LobbyAvailabilityProtocol.handle(
+        serverConn, packet, server::updateLobbyAvailability,
+        server::completeLobbyAvailabilityRequest)) {
+      return true;
+    }
     if (bungeecordMessageResponder.process(packet)) {
       return true;
     }
